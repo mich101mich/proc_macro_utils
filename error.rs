@@ -1,152 +1,148 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "This is a utility module, some methods are here for completeness and in case they are needed in the future"
+)]
 
-use proc_macro2::{Span, TokenStream};
 use std::fmt::Display;
 
-/// A proc-macro error that can be turned into a compile error. More versatile than `syn::Error`
-/// in that it can be used to chain multiple errors together and has some convenience functions.
-pub(crate) struct Error(TokenStream);
+use proc_macro2::{Span, TokenStream};
+use quote::ToTokens;
+pub use syn::{Error, Result};
 
-/// A result type that uses the `Error` type as the error variant
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+/// Macro to create and return an error.
+///
+/// The `$span:expr` arguments can be any type that implements the `ErrorTarget` or `ToTokens` trait.
+macro_rules! bail {
+    // macro arm for multiple spans with different messages
+    // bail!(
+    //     {span1 => msg1},
+    //     {span2 => msg2}, // <-- trailing comma is required to differentiate macro arms
+    //     ...
+    // );
+    ( $( { $span:expr => $format:literal $(, $arg:expr)* }, )+ ) => {{
+        let mut builder = ErrorBuilder::new();
+        $(
+            add_error!(builder, $span => $format $(, $arg)*);
+        )+
+        return builder.build_err();
+    }};
 
-impl Error {
-    /// Create a new error with a message and a span. Note that `span()` does not work reliably
-    /// on stable, so `new_spanned` should be preferred in most cases.
-    pub fn new(span: Span, message: impl Display) -> Self {
-        syn::Error::new(span, message).into()
-    }
-    /// Create a new error with a message and the spans taken from the tokens
-    pub fn new_spanned(tokens: impl quote::ToTokens, message: impl Display) -> Self {
-        syn::Error::new_spanned(tokens, message).into()
-    }
-    /// Create a new error with a message and the spans taken from items in an iterator
-    pub fn new_from_spans<T: quote::ToTokens>(
-        tokens: impl IntoIterator<Item = T>,
-        message: impl Display,
-    ) -> Self {
-        Self::builder().with_spans(tokens, message).build()
-    }
+    // macro arm for multiple spans with the same message
+    // bail!({span1, span2, ...} => msg);
+    ( { $($span:expr),+ } => $format:literal $(, $arg:expr)* ) => {{
+        let mut builder = ErrorBuilder::new();
+        let msg = format!($format $(, $arg)*);
+        $(
+            builder.push($span.error(&msg));
+        )+
+        return builder.build_err();
+    }};
 
-    /// Shorthand for `Err(Error::new(span, message))`, because 99.9% of the time you want to return
-    /// an `Err` when you create an error.
-    pub fn err<R>(span: Span, message: impl Display) -> Result<R> {
-        Err(Self::new(span, message))
-    }
-    /// Shorthand for `Err(Error::new_spanned(tokens, message))`, because 99.9% of the time you want to return
-    /// an `Err` when you create an error.
-    pub fn err_spanned<R>(tokens: impl quote::ToTokens, message: impl Display) -> Result<R> {
-        Err(Self::new_spanned(tokens, message))
-    }
-    /// Shorthand for `Err(Error::new_from_spans(tokens, message))`, because 99.9% of the time you want to return
-    /// an `Err` when you create an error.
-    pub fn err_from_spans<T: quote::ToTokens, R>(
-        tokens: impl IntoIterator<Item = T>,
-        message: impl Display,
-    ) -> Result<R> {
-        Err(Self::new_from_spans(tokens, message))
-    }
-
-    /// Creates an error builder to chain multiple errors together
-    pub fn builder() -> ErrorBuilder {
-        ErrorBuilder::new()
-    }
+    // macro arm for a single span with a message
+    // bail!(span => msg);
+    ( $span:expr => $format:literal $(, $arg:expr)* ) => {
+        return Err($span.error(format_args!($format $(, $arg)*)));
+    };
 }
 
-/// A builder for creating multiple errors at once
-pub(crate) struct ErrorBuilder(TokenStream);
+/// Macro to assert a condition or return an error.
+macro_rules! assert_or_bail {
+    ( $condition:expr, $span:expr => $format:literal $(, $arg:expr)* ) => {
+        if $condition {
+            // do nothing (code is written this way to give a better compile error if the condition is not a boolean)
+        } else {
+            bail!($span => $format $(, $arg)*);
+        }
+    };
+}
+
+/// Macro to add an error to an `ErrorBuilder`.
+macro_rules! add_error {
+    ( $error_builder:ident, $span:expr => $format:literal $(, $arg:expr)* ) => {
+        $error_builder.push($span.error(format_args!($format $(, $arg)*)));
+    };
+}
+
+pub(crate) use {add_error, assert_or_bail, bail};
+
+/// Builder for `syn::Error` that allows combining multiple errors into one.
+pub struct ErrorBuilder(Option<Error>);
 
 impl ErrorBuilder {
-    /// Use `Error::builder()` instead
-    fn new() -> Self {
-        Self(TokenStream::new())
+    pub fn new() -> Self {
+        Self(None)
     }
-
-    /// Add an error with a message and a span. Same as `Error::new`
     pub fn with<T: Display>(&mut self, span: Span, message: T) -> &mut Self {
         self.with_error(Error::new(span, message))
     }
-    /// Add an error with a message and the spans taken from the tokens. Same as `Error::new_spanned`
-    pub fn with_spanned(
-        &mut self,
-        tokens: impl quote::ToTokens,
-        message: impl Display,
-    ) -> &mut Self {
+    pub fn with_spanned<T: ToTokens, U: Display>(&mut self, tokens: T, message: U) -> &mut Self {
         self.with_error(Error::new_spanned(tokens, message))
     }
-    /// Add an error with a message and the spans taken from items in an iterator
-    pub fn with_spans<T: quote::ToTokens>(
-        &mut self,
-        tokens: impl IntoIterator<Item = T>,
-        message: impl Display,
-    ) -> &mut Self {
-        tokens
-            .into_iter()
-            .fold(self, |builder, token| builder.with_spanned(token, &message))
-    }
-    /// Add an already created error
-    pub fn with_error(&mut self, error: impl Into<Error>) -> &mut Self {
-        self.0.extend(TokenStream::from(error.into()));
+    pub fn with_error(&mut self, error: Error) -> &mut Self {
+        match self.0 {
+            Some(ref mut existing) => existing.combine(error),
+            None => self.0 = Some(error),
+        }
         self
     }
-    /// Add an already created error
-    pub fn push(&mut self, error: impl Into<Error>) {
+    pub fn push(&mut self, error: Error) {
         self.with_error(error);
     }
 
-    /// Check if there are any errors
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.is_none()
     }
 
-    /// Build the errors into a single error
     pub fn build(&mut self) -> Error {
-        Error(std::mem::take(&mut self.0))
+        self.0.take().unwrap() // it is up to the caller to ensure that there is an error
     }
-    /// Build the errors into a single error and return it as a result
     pub fn build_err<R>(&mut self) -> Result<R> {
         Err(self.build())
     }
-    /// Build the errors into a result if there are any, returning `Ok(())` if there are none.
-    /// This function is useful if a block of code may or may not add errors, and you want to
-    /// return early if there are any:
-    /// ```ignore
-    /// let mut error = Error::builder();
-    /// for item in items {
-    ///     if !process_item(item) {
-    ///         error.with_spanned(item, "failed to process item");
-    ///     }
-    /// }
-    /// error.ok_or_build()?;
-    /// ```
     pub fn ok_or_build(&mut self) -> Result<()> {
-        if self.is_empty() {
-            Ok(())
-        } else {
-            self.build_err()
+        match self.0.take() {
+            Some(err) => Err(err),
+            None => Ok(()),
         }
     }
 }
 
-impl From<syn::Error> for Error {
-    fn from(err: syn::Error) -> Self {
-        Error(err.to_compile_error())
+/// Trait for types that can be used as the part underlined in an error message.
+pub trait ErrorTarget {
+    /// Create an error from the source and message
+    fn error(&self, message: impl Display) -> Error;
+}
+
+impl ErrorTarget for Span {
+    fn error(&self, message: impl Display) -> Error {
+        Error::new(*self, message)
     }
 }
 
-impl From<TokenStream> for Error {
-    fn from(err: TokenStream) -> Self {
-        Error(err)
+/// Like `ErrorTarget`, but for types that implement `ToTokens`.
+///
+/// Note that we don't just implement `ErrorTarget`, because the compiler will complain an upstream crate might
+/// implement `ToTokens` for `Span`. (It won't, but the compiler can't know that.)
+pub trait ToTokensErrorTarget {
+    /// Create an error from the given tokens and message.
+    fn error(&self, message: impl Display) -> Error;
+}
+
+impl<S: ToTokens> ToTokensErrorTarget for S {
+    fn error(&self, message: impl Display) -> Error {
+        Error::new_spanned(self, message)
     }
 }
 
-impl From<Error> for TokenStream {
-    fn from(err: Error) -> Self {
-        err.0
-    }
+pub trait ResultExt {
+    /// Convert the `Result` into a `TokenStream`, turning errors into compile errors.
+    fn into_token_stream_1(self) -> proc_macro::TokenStream;
 }
-impl From<Error> for proc_macro::TokenStream {
-    fn from(err: Error) -> Self {
-        err.0.into()
+impl ResultExt for Result<TokenStream> {
+    fn into_token_stream_1(self) -> proc_macro::TokenStream {
+        match self {
+            Ok(ts) => ts.into(),
+            Err(e) => e.into_compile_error().into(),
+        }
     }
 }
