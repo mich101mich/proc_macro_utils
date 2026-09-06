@@ -84,12 +84,12 @@ fn extract_type_lifetimes(ty: &syn::Type, out: &mut LifetimeSet) {
                 extract_type_param_bound_lifetimes(bound, out);
             }
         }
-        syn::Type::BareFn(type_bare_fn) => {
-            out.with_excludes(&type_bare_fn.lifetimes, |out| {
-                for param in &type_bare_fn.inputs {
+        syn::Type::FnPtr(type_fn_ptr) => {
+            out.with_excludes(&type_fn_ptr.lifetimes, |out| {
+                for param in &type_fn_ptr.inputs {
                     extract_type_lifetimes(&param.ty, out);
                 }
-                if let syn::ReturnType::Type(_, output) = &type_bare_fn.output {
+                if let syn::ReturnType::Type(_, output) = &type_fn_ptr.output {
                     extract_type_lifetimes(output, out);
                 }
             });
@@ -112,7 +112,7 @@ fn extract_path_lifetimes(ty: &syn::Path, out: &mut LifetimeSet) {
             }
             syn::PathArguments::Parenthesized(parenthesized_generic_arguments) => {
                 for arg in &parenthesized_generic_arguments.inputs {
-                    extract_type_lifetimes(arg, out);
+                    extract_type_lifetimes(&arg.ty, out);
                 }
                 if let syn::ReturnType::Type(_, output) = &parenthesized_generic_arguments.output {
                     extract_type_lifetimes(output, out);
